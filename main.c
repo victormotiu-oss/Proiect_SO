@@ -4,299 +4,344 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <time.h>
-#include <errno.h>
 
-#define STR_LEN 64
-#define DESC_LEN 256
+#define ROLE_MANAGER 1
+#define ROLE_INSPECTOR 2
 
-// 1. Structura cerută pentru un raport
 typedef struct {
     int id;
-    char inspector[STR_LEN];
-    float latitude;
-    float longitude;
-    char category[STR_LEN];
+    char inspector[32];
+    float lat;
+    float lon;
+    char category[16];
     int severity;
     time_t timestamp;
-    char description[DESC_LEN];
+    char description[128];
 } Report;
 
+// --- VARIABILE GLOBALE PENTRU CONTEXT ---
+int g_role = 0;
+char g_user[32] = "";
 
+// ==========================================
+// 1. FUNCȚII GENERATE DE AI (Filtrare)
+// ==========================================
 int parse_condition(const char *input, char *field, char *op, char *value) {
-    const char *colon1 = strchr(input, ':');
-    if (!colon1) return 0;
-    const char *colon2 = strchr(colon1 + 1, ':');
-    if (!colon2) return 0;
-
-    int field_len = colon1 - input;
-    strncpy(field, input, field_len);
-    field[field_len] = '\0';
-
-    int op_len = colon2 - (colon1 + 1);
-    strncpy(op, colon1 + 1, op_len);
-    op[op_len] = '\0';
-
-    strcpy(value, colon2 + 1);
+    char temp[256];
+    strncpy(temp, input, sizeof(temp));
+    
+    char *token = strtok(temp, ":");
+    if (!token) return 0;
+    strcpy(field, token);
+    
+    token = strtok(NULL, ":");
+    if (!token) return 0;
+    strcpy(op, token);
+    
+    token = strtok(NULL, "");
+    if (!token) return 0;
+    strcpy(value, token);
+    
     return 1;
 }
 
 int match_condition(Report *r, const char *field, const char *op, const char *value) {
     if (strcmp(field, "severity") == 0) {
         int val = atoi(value);
-        if (strcmp(op, "==") == 0) return r->severity == val;
-        if (strcmp(op, "!=") == 0) return r->severity != val;
-        if (strcmp(op, "<") == 0) return r->severity < val;
-        if (strcmp(op, "<=") == 0) return r->severity <= val;
-        if (strcmp(op, ">") == 0) return r->severity > val;
         if (strcmp(op, ">=") == 0) return r->severity >= val;
-    } else if (strcmp(field, "category") == 0) {
+        if (strcmp(op, "==") == 0) return r->severity == val;
+    }
+    if (strcmp(field, "category") == 0) {
         if (strcmp(op, "==") == 0) return strcmp(r->category, value) == 0;
-        if (strcmp(op, "!=") == 0) return strcmp(r->category, value) != 0;
-    } else if (strcmp(field, "inspector") == 0) {
-        if (strcmp(op, "==") == 0) return strcmp(r->inspector, value) == 0;
-        if (strcmp(op, "!=") == 0) return strcmp(r->inspector, value) != 0;
     }
-    return 0;
+    return 0; 
 }
 
-// Comanda 1: INIT
+// ==========================================
+// 2. FUNCȚII UTILITARE (Modulare)
+// ==========================================
+
+// Verifică dacă utilizatorul curent are acces pe baza permisiunilor UNIX (Owner = Manager, Group = Inspector)
+int check_access(const char *filepath, int req_manager, int req_inspector) {
+    struct stat st;
+    if (stat(filepath, &st) < 0) return 1; // Permitem trecerea dacă fișierul nu există încă
+    
+    if (g_role == ROLE_MANAGER && !(st.st_mode & req_manager)) {
+        printf("Eroare: Managerul nu are permisiuni (lipseste bitul %o).\n", req_manager);
+        return 0;
+    }
+    if (g_role == ROLE_INSPECTOR && !(st.st_mode & req_inspector)) {
+        printf("Eroare: Inspectorul nu are permisiuni (lipseste bitul %o).\n", req_inspector);
+        return 0;
+    }
+    return 1;
+}
+
+// Scrie automat acțiunea în logged_district
+void log_action(const char *district, const char *action) {
+    char path[256];
+    snprintf(path, sizeof(path), "%s/logged_district", district);
+    
+    struct stat st;
+    if (stat(path, &st) == 0 && g_role == ROLE_INSPECTOR && !(st.st_mode & S_IWGRP)) {
+        return; // Inspectorul nu are voie să scrie (rw-r--r--)
+    }
+
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) return;
+
+    char entry[256];
+    snprintf(entry, sizeof(entry), "[%ld] ROLE:%d USER:%s ACTION:%s\n", time(NULL), g_role, g_user, action);
+    write(fd, entry, strlen(entry));
+    close(fd);
+}
+
+// Inițializează districtul (directoare, fișiere implicite, symlink-uri)
 void init_district(const char *district) {
-    if (mkdir(district, 0775) == -1 && errno != EEXIST) {
-        perror("Eroare creare director");
-        return;
-    }
+    mkdir(district, 0750); // Doar managerul rwx, inspectorul rx
 
-    char path[512];
-
-    // Creare reports.dat
-    snprintf(path, sizeof(path), "%s/reports.dat", district);
-    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0664);
-    if (fd != -1) close(fd);
-
-    // Creare district.cfg
+    char path[256], sym[256];
+    
     snprintf(path, sizeof(path), "%s/district.cfg", district);
-    fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0640);
-    if (fd != -1) {
-        write(fd, "role=admin\nlevel=1\n", 19);
-        close(fd);
-    }
+    int fd = open(path, O_CREAT | O_WRONLY, 0640);
+    if (fd >= 0) { write(fd, "threshold=2\n", 12); close(fd); }
 
-    // Creare symlink
-    char link_path[512];
-    snprintf(link_path, sizeof(link_path), "%s/reports_link", district);
-    symlink("reports.dat", link_path);
+    snprintf(path, sizeof(path), "%s/logged_district", district);
+    fd = open(path, O_CREAT | O_WRONLY, 0644);
+    if (fd >= 0) close(fd);
 
-    printf("Districtul '%s' a fost initializat.\n", district);
+    snprintf(path, sizeof(path), "%s/reports.dat", district);
+    snprintf(sym, sizeof(sym), "active_reports-%s", district);
+    symlink(path, sym); // Creare symlink
 }
 
-// Comanda 2: ADD
-void add_report(const char *district, char *inspector, float lat, float lon, char *cat, int sev, char *desc) {
-    char path[512];
-    snprintf(path, sizeof(path), "%s/reports.dat", district);
+// ==========================================
+// 3. COMENZILE PRINCIPALE
+// ==========================================
 
-    int fd = open(path, O_WRONLY | O_APPEND);
-    if (fd == -1) {
-        printf("Eroare: Ruleaza 'init' pentru districtul '%s' mai intai.\n", district);
+void add(const char *district) {
+    init_district(district);
+    char path[256];
+    snprintf(path, sizeof(path), "%s/reports.dat", district);
+    
+    // Verificăm dacă utilizatorul are permisiuni de scriere
+    if (!check_access(path, S_IWUSR, S_IWGRP)) return;
+
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0664);
+    if (fd < 0) {
+        perror("Eroare la deschiderea fisierului");
         return;
     }
 
     Report r;
-    struct stat st;
-    fstat(fd, &st);
-    r.id = (st.st_size / sizeof(Report)) + 1; // Generare ID
-
-    strncpy(r.inspector, inspector, STR_LEN);
-    r.latitude = lat;
-    r.longitude = lon;
-    strncpy(r.category, cat, STR_LEN);
-    r.severity = sev;
+    // Generăm automat ID-ul, timestamp-ul și luăm inspectorul din argumente
+    r.id = rand() % 10000; 
     r.timestamp = time(NULL);
-    strncpy(r.description, desc, DESC_LEN);
+    strncpy(r.inspector, g_user, 31);
 
+    // --- CITIREA INTERACTIVĂ DE LA TASTATURĂ ---
+    printf("\n--- Adaugare Raport Nou in %s ---\n", district);
+    
+    printf("Categorie (ex: road, lighting, flooding): ");
+    scanf("%15s", r.category);
+
+    printf("Latitudine (ex: 44.42): ");
+    scanf("%f", &r.lat);
+
+    printf("Longitudine (ex: 26.10): ");
+    scanf("%f", &r.lon);
+
+    printf("Severitate (1=minor, 2=moderat, 3=critic): ");
+    scanf("%d", &r.severity);
+
+    // Curățăm buffer-ul de tastatură (\n rămas de la ultimul scanf)
+    // Altfel, fgets va citi un rând gol și va trece mai departe.
+    int c;
+    while ((c = getchar()) != '\n' && c != EOF);
+
+    printf("Descriere: ");
+    fgets(r.description, sizeof(r.description), stdin);
+    // Eliminăm caracterul '\n' (Enter) pus automat de fgets la final
+    r.description[strcspn(r.description, "\n")] = 0;
+
+    // Scriere în fișier
     write(fd, &r, sizeof(Report));
     close(fd);
-    printf("Raport %d adaugat in %s.\n", r.id, district);
+    
+    chmod(path, 0664); // Forțăm permisiunile la 664
+    log_action(district, "ADD");
+    
+    printf("\n✅ Raport adaugat cu succes! ID-ul generat este: %d\n", r.id);
 }
 
-// Comanda 3: READ ALL / LIST
-void read_all(const char *district) {
-    char path[512];
+void list(const char *district) {
+    char path[256];
     snprintf(path, sizeof(path), "%s/reports.dat", district);
+    
+    if (!check_access(path, S_IRUSR, S_IRGRP)) return;
+
+    struct stat st;
+    if (stat(path, &st) < 0) return;
+
+    // Conversie manuală pe biți a permisiunilor (format rw-rw-r--)
+    char p[] = "---------";
+    if (st.st_mode & S_IRUSR) p[0] = 'r'; if (st.st_mode & S_IWUSR) p[1] = 'w'; if (st.st_mode & S_IXUSR) p[2] = 'x';
+    if (st.st_mode & S_IRGRP) p[3] = 'r'; if (st.st_mode & S_IWGRP) p[4] = 'w'; if (st.st_mode & S_IXGRP) p[5] = 'x';
+    if (st.st_mode & S_IROTH) p[6] = 'r'; if (st.st_mode & S_IWOTH) p[7] = 'w'; if (st.st_mode & S_IXOTH) p[8] = 'x';
+
+    printf("Fisier: %s | Permisiuni: %s | Dimensiune: %ld\n", path, p, st.st_size);
 
     int fd = open(path, O_RDONLY);
-    if (fd == -1) {
-        printf("Nu exista rapoarte in %s.\n", district);
-        return;
-    }
-
     Report r;
-    printf("\n--- Rapoarte in %s ---\n", district);
-    printf("%-3s | %-15s | %-12s | %-3s | %s\n", "ID", "Inspector", "Categorie", "Sev", "Data");
     while (read(fd, &r, sizeof(Report)) > 0) {
-        printf("%-3d | %-15s | %-12s | %-3d | %s", r.id, r.inspector, r.category, r.severity, ctime(&r.timestamp));
+        printf("ID: %d | Inspector: %s | Categorie: %s\n", r.id, r.inspector, r.category);
     }
     close(fd);
+    log_action(district, "LIST");
 }
 
-// Comanda 4: FILTER
-void filter_reports(const char *district, const char *condition) {
-    char path[512];
+void view(const char *district, int report_id) {
+    char path[256];
     snprintf(path, sizeof(path), "%s/reports.dat", district);
-
-    char field[STR_LEN], op[10], value[STR_LEN];
-    if (!parse_condition(condition, field, op, value)) {
-        printf("Eroare: Format conditie invalid. Foloseste camp:operator:valoare\n");
-        return;
-    }
+    
+    if (!check_access(path, S_IRUSR, S_IRGRP)) return;
 
     int fd = open(path, O_RDONLY);
-    if (fd == -1) return;
+    if (fd < 0) return;
 
     Report r;
-    printf("\n--- Rezultate Filtrare in %s ---\n", district);
     while (read(fd, &r, sizeof(Report)) > 0) {
-        if (match_condition(&r, field, op, value)) {
-            printf("ID %d | Categ: %s | Sev: %d | Desc: %s\n", r.id, r.category, r.severity, r.description);
+        if (r.id == report_id) {
+            printf("--- DETALII RAPORT %d ---\n", r.id);
+            printf("Inspector: %s\nCateg: %s\nSeveritate: %d\nDescriere: %s\n", r.inspector, r.category, r.severity, r.description);
+            break;
         }
     }
     close(fd);
+    log_action(district, "VIEW");
 }
 
-// Comanda 5: REMOVE REPORT
-void remove_report(const char *district, int id_to_remove) {
-    char path[512];
-    snprintf(path, sizeof(path), "%s/reports.dat", district);
-
-    int fd = open(path, O_RDWR);
-    if (fd == -1) {
-        printf("Eroare la deschiderea fisierului.\n");
+void remove_report(const char *district, int report_id) {
+    if (g_role != ROLE_MANAGER) {
+        printf("Eroare: Doar managerul poate sterge rapoarte.\n");
         return;
     }
 
-    struct stat st;
-    fstat(fd, &st);
-    int total_reports = st.st_size / sizeof(Report);
-    Report r;
-    int found_index = -1;
+    char path[256];
+    snprintf(path, sizeof(path), "%s/reports.dat", district);
+    
+    int fd = open(path, O_RDWR);
+    if (fd < 0) return;
 
-    // 1. Cautam indexul raportului
-    for (int i = 0; i < total_reports; i++) {
-        lseek(fd, i * sizeof(Report), SEEK_SET);
-        read(fd, &r, sizeof(Report));
-        if (r.id == id_to_remove) {
-            found_index = i;
+    Report r;
+    off_t found_pos = -1;
+    
+    // 1. Găsim poziția raportului
+    while (read(fd, &r, sizeof(Report)) > 0) {
+        if (r.id == report_id) {
+            found_pos = lseek(fd, 0, SEEK_CUR) - sizeof(Report);
             break;
         }
     }
 
-    // 2. Daca l-am gasit, mutam rapoartele de dupa el cu o pozitie in spate
-    if (found_index != -1) {
-        for (int i = found_index + 1; i < total_reports; i++) {
-            lseek(fd, i * sizeof(Report), SEEK_SET);
-            read(fd, &r, sizeof(Report));
+    // 2. Shiftăm restul înregistrărilor în spate folosind lseek
+    if (found_pos != -1) {
+        off_t read_pos = found_pos + sizeof(Report);
+        off_t write_pos = found_pos;
 
-            lseek(fd, (i - 1) * sizeof(Report), SEEK_SET);
+        while (lseek(fd, read_pos, SEEK_SET) >= 0 && read(fd, &r, sizeof(Report)) > 0) {
+            read_pos = lseek(fd, 0, SEEK_CUR); // Salvăm unde am rămas cu cititul
+            lseek(fd, write_pos, SEEK_SET);    // Ne mutăm în spate pentru scriere
             write(fd, &r, sizeof(Report));
+            write_pos += sizeof(Report);
         }
-
-        // 3. Taiem finalul fisierului
-        ftruncate(fd, (total_reports - 1) * sizeof(Report));
-        printf("Raportul cu ID %d a fost sters din %s.\n", id_to_remove, district);
+        
+        // 3. Trunchiem ultima înregistrare rămasă în plus
+        ftruncate(fd, write_pos);
+        printf("Raport %d sters.\n", report_id);
+        log_action(district, "REMOVE");
     } else {
-        printf("Raportul cu ID %d nu a fost gasit.\n", id_to_remove);
+        printf("Raport inexistent.\n");
     }
-
     close(fd);
 }
 
-// Comanda 6: UPDATE THRESHOLD
-void update_threshold(const char *district, int new_threshold) {
-    char path[512];
+void update_threshold(const char *district, int new_val) {
+    if (g_role != ROLE_MANAGER) {
+        printf("Eroare: Doar managerul poate schimba threshold-ul.\n");
+        return;
+    }
+
+    char path[256];
     snprintf(path, sizeof(path), "%s/district.cfg", district);
-
-    // Deschidem fisierul cu O_RDWR (Citire si Scriere)
-    int fd = open(path, O_RDWR);
-    if (fd == -1) {
-        printf("Eroare: Nu s-a putut deschide %s/district.cfg\n", district);
+    
+    struct stat st;
+    stat(path, &st);
+    if ((st.st_mode & 0777) != 0640) {
+        printf("Eroare: Permisiunile fisierului cfg au fost alterate. Oprire.\n");
         return;
     }
 
-    char buffer[1024] = {0};
-    int bytes_read = read(fd, buffer, sizeof(buffer) - 1);
-    if (bytes_read < 0) {
-        perror("Eroare la citirea configuratiei");
+    int fd = open(path, O_WRONLY | O_TRUNC);
+    if (fd >= 0) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "threshold=%d\n", new_val);
+        write(fd, buf, strlen(buf));
         close(fd);
-        return;
+        printf("Threshold actualizat la %d.\n", new_val);
+        log_action(district, "UPDATE_THRESHOLD");
     }
-
-    char new_content[1024] = {0};
-    char *pos = strstr(buffer, "threshold=");
-
-    if (pos != NULL) {
-        // Daca "threshold=" exista deja, rescriem fisierul inlocuind valoarea veche
-        int prefix_len = pos - buffer;
-        strncpy(new_content, buffer, prefix_len);
-
-        char *end_of_line = strchr(pos, '\n');
-        char temp[64];
-        snprintf(temp, sizeof(temp), "threshold=%d\n", new_threshold);
-        strcat(new_content, temp);
-
-        if (end_of_line != NULL) {
-            strcat(new_content, end_of_line + 1);
-        }
-    } else {
-        // Daca nu exista, copiem ce era inainte si adaugam threshold-ul la final
-        strcpy(new_content, buffer);
-        if (strlen(new_content) > 0 && new_content[strlen(new_content) - 1] != '\n') {
-            strcat(new_content, "\n"); // Ne asiguram ca scriem pe rand nou
-        }
-        char temp[64];
-        snprintf(temp, sizeof(temp), "threshold=%d\n", new_threshold);
-        strcat(new_content, temp);
-    }
-
-    // Trunchiem fisierul la 0 bytes (il stergem de continutul vechi)
-    ftruncate(fd, 0);
-    // Mutam cursorul inapoi la inceput
-    lseek(fd, 0, SEEK_SET);
-    // Scriem noul text in fisier
-    write(fd, new_content, strlen(new_content));
-
-    printf("Threshold actualizat cu succes la %d in fisierul %s/district.cfg\n", new_threshold, district);
-    close(fd);
 }
+
+void filter(const char *district, const char *condition) {
+    char path[256];
+    snprintf(path, sizeof(path), "%s/reports.dat", district);
+    
+    if (!check_access(path, S_IRUSR, S_IRGRP)) return;
+
+    char field[32], op[4], value[64];
+    if (!parse_condition(condition, field, op, value)) return;
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return;
+
+    Report r;
+    printf("Rezultate filtru (%s):\n", condition);
+    while (read(fd, &r, sizeof(Report)) > 0) {
+        if (match_condition(&r, field, op, value)) {
+            printf("- ID: %d | Categ: %s | Sev: %d\n", r.id, r.category, r.severity);
+        }
+    }
+    close(fd);
+    log_action(district, "FILTER");
+}
+
+// ==========================================
+// PUNCTUL DE INTRARE
+// ==========================================
 
 int main(int argc, char *argv[]) {
-    if (argc < 3) {
-        printf("Comenzi disponibile:\n");
-        printf(" %s init <district>\n", argv[0]);
-        printf(" %s add <district> <inspector> <lat> <long> <categorie> <gravitate> <descriere>\n", argv[0]);
-        printf(" %s list <district>\n", argv[0]);
-        printf(" %s filter <district> <conditie>\n", argv[0]);
-        printf(" %s remove <district> <id>\n", argv[0]);
-        printf(" %s update_threshold <district> <valoare>\n", argv[0]);
-        return 1;
+    // Parsare argumente de bază
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--role") == 0) {
+            if (strcmp(argv[i+1], "manager") == 0) g_role = ROLE_MANAGER;
+            if (strcmp(argv[i+1], "inspector") == 0) g_role = ROLE_INSPECTOR;
+        }
+        if (strcmp(argv[i], "--user") == 0) {
+            strncpy(g_user, argv[i+1], 31);
+        }
     }
 
-    char *command = argv[1];
-    char *district = argv[2];
-
-    if (strcmp(command, "init") == 0) {
-        init_district(district);
-    } else if (strcmp(command, "add") == 0 && argc == 10) {
-        add_report(district, argv[3], atof(argv[4]), atof(argv[5]), argv[6], atoi(argv[7]), argv[8]);
-    } else if (strcmp(command, "list") == 0) {
-        read_all(district);
-    } else if (strcmp(command, "filter") == 0 && argc == 4) {
-        filter_reports(district, argv[3]);
-    } else if (strcmp(command, "remove") == 0 && argc == 4) {
-        remove_report(district, atoi(argv[3]));
-    } else if (strcmp(command, "update_threshold") == 0 && argc == 4) {
-        update_threshold(district, atoi(argv[3]));
-    } else {
-        printf("Comanda invalida sau numar gresit de argumente.\n");
+    // Rutarea comenzilor
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--add") == 0) add(argv[i+1]);
+        if (strcmp(argv[i], "--list") == 0) list(argv[i+1]);
+        if (strcmp(argv[i], "--view") == 0) view(argv[i+1], atoi(argv[i+2]));
+        if (strcmp(argv[i], "--remove_report") == 0) remove_report(argv[i+1], atoi(argv[i+2]));
+        if (strcmp(argv[i], "--update_threshold") == 0) update_threshold(argv[i+1], atoi(argv[i+2]));
+        if (strcmp(argv[i], "--filter") == 0) filter(argv[i+1], argv[i+2]);
     }
 
     return 0;
