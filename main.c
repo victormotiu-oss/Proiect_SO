@@ -21,13 +21,9 @@ typedef struct {
     char description[128];
 } Report;
 
-// --- VARIABILE GLOBALE PENTRU CONTEXT ---
 int g_role = 0;
 char g_user[32] = "";
 
-// ==========================================
-// 1. FUNCȚII GENERATE DE AI (Filtrare)
-// ==========================================
 int parse_condition(const char *input, char *field, char *op, char *value) {
     char temp[256];
     strncpy(temp, input, sizeof(temp));
@@ -59,14 +55,9 @@ int match_condition(Report *r, const char *field, const char *op, const char *va
     return 0; 
 }
 
-// ==========================================
-// 2. FUNCȚII UTILITARE (Modulare)
-// ==========================================
-
-// Verifică dacă utilizatorul curent are acces pe baza permisiunilor UNIX (Owner = Manager, Group = Inspector)
 int check_access(const char *filepath, int req_manager, int req_inspector) {
     struct stat st;
-    if (stat(filepath, &st) < 0) return 1; // Permitem trecerea dacă fișierul nu există încă
+    if (stat(filepath, &st) < 0) return 1; 
     
     if (g_role == ROLE_MANAGER && !(st.st_mode & req_manager)) {
         printf("Eroare: Managerul nu are permisiuni (lipseste bitul %o).\n", req_manager);
@@ -79,14 +70,13 @@ int check_access(const char *filepath, int req_manager, int req_inspector) {
     return 1;
 }
 
-// Scrie automat acțiunea în logged_district
 void log_action(const char *district, const char *action) {
     char path[256];
     snprintf(path, sizeof(path), "%s/logged_district", district);
     
     struct stat st;
     if (stat(path, &st) == 0 && g_role == ROLE_INSPECTOR && !(st.st_mode & S_IWGRP)) {
-        return; // Inspectorul nu are voie să scrie (rw-r--r--)
+        return;
     }
 
     int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -98,9 +88,8 @@ void log_action(const char *district, const char *action) {
     close(fd);
 }
 
-// Inițializează districtul (directoare, fișiere implicite, symlink-uri)
 void init_district(const char *district) {
-    mkdir(district, 0750); // Doar managerul rwx, inspectorul rx
+    mkdir(district, 0750);
 
     char path[256], sym[256];
     
@@ -114,19 +103,14 @@ void init_district(const char *district) {
 
     snprintf(path, sizeof(path), "%s/reports.dat", district);
     snprintf(sym, sizeof(sym), "active_reports-%s", district);
-    symlink(path, sym); // Creare symlink
+    symlink(path, sym); 
 }
-
-// ==========================================
-// 3. COMENZILE PRINCIPALE
-// ==========================================
 
 void add(const char *district) {
     init_district(district);
     char path[256];
     snprintf(path, sizeof(path), "%s/reports.dat", district);
     
-    // Verificăm dacă utilizatorul are permisiuni de scriere
     if (!check_access(path, S_IWUSR, S_IWGRP)) return;
 
     int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0664);
@@ -136,12 +120,10 @@ void add(const char *district) {
     }
 
     Report r;
-    // Generăm automat ID-ul, timestamp-ul și luăm inspectorul din argumente
     r.id = rand() % 10000; 
     r.timestamp = time(NULL);
     strncpy(r.inspector, g_user, 31);
 
-    // --- CITIREA INTERACTIVĂ DE LA TASTATURĂ ---
     printf("\n--- Adaugare Raport Nou in %s ---\n", district);
     
     printf("Categorie (ex: road, lighting, flooding): ");
@@ -156,21 +138,17 @@ void add(const char *district) {
     printf("Severitate (1=minor, 2=moderat, 3=critic): ");
     scanf("%d", &r.severity);
 
-    // Curățăm buffer-ul de tastatură (\n rămas de la ultimul scanf)
-    // Altfel, fgets va citi un rând gol și va trece mai departe.
     int c;
     while ((c = getchar()) != '\n' && c != EOF);
 
     printf("Descriere: ");
     fgets(r.description, sizeof(r.description), stdin);
-    // Eliminăm caracterul '\n' (Enter) pus automat de fgets la final
     r.description[strcspn(r.description, "\n")] = 0;
 
-    // Scriere în fișier
     write(fd, &r, sizeof(Report));
     close(fd);
     
-    chmod(path, 0664); // Forțăm permisiunile la 664
+    chmod(path, 0664); 
     log_action(district, "ADD");
     
     printf("\n✅ Raport adaugat cu succes! ID-ul generat este: %d\n", r.id);
@@ -185,7 +163,6 @@ void list(const char *district) {
     struct stat st;
     if (stat(path, &st) < 0) return;
 
-    // Conversie manuală pe biți a permisiunilor (format rw-rw-r--)
     char p[] = "---------";
     if (st.st_mode & S_IRUSR) p[0] = 'r'; if (st.st_mode & S_IWUSR) p[1] = 'w'; if (st.st_mode & S_IXUSR) p[2] = 'x';
     if (st.st_mode & S_IRGRP) p[3] = 'r'; if (st.st_mode & S_IWGRP) p[4] = 'w'; if (st.st_mode & S_IXGRP) p[5] = 'x';
@@ -238,7 +215,6 @@ void remove_report(const char *district, int report_id) {
     Report r;
     off_t found_pos = -1;
     
-    // 1. Găsim poziția raportului
     while (read(fd, &r, sizeof(Report)) > 0) {
         if (r.id == report_id) {
             found_pos = lseek(fd, 0, SEEK_CUR) - sizeof(Report);
@@ -246,19 +222,17 @@ void remove_report(const char *district, int report_id) {
         }
     }
 
-    // 2. Shiftăm restul înregistrărilor în spate folosind lseek
     if (found_pos != -1) {
         off_t read_pos = found_pos + sizeof(Report);
         off_t write_pos = found_pos;
 
         while (lseek(fd, read_pos, SEEK_SET) >= 0 && read(fd, &r, sizeof(Report)) > 0) {
-            read_pos = lseek(fd, 0, SEEK_CUR); // Salvăm unde am rămas cu cititul
-            lseek(fd, write_pos, SEEK_SET);    // Ne mutăm în spate pentru scriere
+            read_pos = lseek(fd, 0, SEEK_CUR);
+            lseek(fd, write_pos, SEEK_SET);
             write(fd, &r, sizeof(Report));
             write_pos += sizeof(Report);
         }
         
-        // 3. Trunchiem ultima înregistrare rămasă în plus
         ftruncate(fd, write_pos);
         printf("Raport %d sters.\n", report_id);
         log_action(district, "REMOVE");
@@ -318,10 +292,6 @@ void filter(const char *district, const char *condition) {
     log_action(district, "FILTER");
 }
 
-// ==========================================
-// PUNCTUL DE INTRARE
-// ==========================================
-
 int main(int argc, char *argv[]) {
     // Parsare argumente de bază
     for (int i = 1; i < argc; i++) {
@@ -334,7 +304,6 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Rutarea comenzilor
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--add") == 0) add(argv[i+1]);
         if (strcmp(argv[i], "--list") == 0) list(argv[i+1]);
