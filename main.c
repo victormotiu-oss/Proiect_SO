@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
+#include <sys/wait.h>
 
 #define ROLE_MANAGER 1
 #define ROLE_INSPECTOR 2
@@ -69,6 +70,34 @@ int check_access(const char *filepath, int req_manager, int req_inspector) {
     }
     return 1;
 }
+
+void remove_district(const char *district)
+{
+    if(g_role!=ROLE_MANAGER){
+        printf("Doar managerul are access sa stearga un district");
+        return;
+    }
+    char symlink[256];
+    snprintf(symlink,sizeof(symlink),"active_reports-%s", district);
+    pid_t p = fork();
+    if(p==0){
+        execlp("rm","rm","-rf", district,NULL);
+    }
+    else {
+        waitpid(p,NULL,0);
+        if(unlink(symlink)==-1){
+            printf("Nu s-a sters symlink!\n");
+            return;
+        }
+        else
+        if(unlink(symlink)==0){
+            printf("Symlink sters cu success");
+            return;
+        }
+    }
+    
+}
+
 
 void log_action(const char *district, const char *action) {
     char path[256];
@@ -151,7 +180,7 @@ void add(const char *district) {
     chmod(path, 0664); 
     log_action(district, "ADD");
     
-    printf("\n✅ Raport adaugat cu succes! ID-ul generat este: %d\n", r.id);
+    printf("\n Raport adaugat cu succes! ID-ul generat este: %d\n", r.id);
 }
 
 void list(const char *district) {
@@ -311,6 +340,7 @@ int main(int argc, char *argv[]) {
         if (strcmp(argv[i], "--remove_report") == 0) remove_report(argv[i+1], atoi(argv[i+2]));
         if (strcmp(argv[i], "--update_threshold") == 0) update_threshold(argv[i+1], atoi(argv[i+2]));
         if (strcmp(argv[i], "--filter") == 0) filter(argv[i+1], argv[i+2]);
+        if (strcmp(argv[i], "--remove_district")==0 ) remove_district(argv[i+1]);
     }
 
     return 0;
