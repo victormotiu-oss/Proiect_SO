@@ -79,6 +79,7 @@ void remove_district(const char *district)
     }
     char symlink[256];
     snprintf(symlink,sizeof(symlink),"active_reports-%s", district);
+    
     pid_t p = fork();
     if(p==0){
         execlp("rm","rm","-rf", district,NULL);
