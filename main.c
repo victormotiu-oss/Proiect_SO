@@ -7,6 +7,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <sys/wait.h>
+#include <signal.h>
 
 #define ROLE_MANAGER 1
 #define ROLE_INSPECTOR 2
@@ -179,9 +180,37 @@ void add(const char *district) {
     close(fd);
     
     chmod(path, 0664); 
-    log_action(district, "ADD");
     
-    printf("\n Raport adaugat cu succes! ID-ul generat este: %d\n", r.id);
+    int monitor_notified = 0; 
+    
+    // Deschidem fișierul .monitor_pid din directorul curent
+    int pid_fd = open(".monitor_pid", O_RDONLY);
+    if (pid_fd >= 0) {
+        char pid_buf[32] = {0};
+        int bytes_read = read(pid_fd, pid_buf, sizeof(pid_buf) - 1);
+        close(pid_fd);
+        
+        if (bytes_read > 0) {
+            pid_t monitor_pid = (pid_t)atoi(pid_buf);
+            
+            // Folosim kill pentru a trimite semnalul. kill returnează 0 pe succes.
+            if (monitor_pid > 0 && kill(monitor_pid, SIGUSR1) == 0) {
+                monitor_notified = 1; // Semnalul a fost trimis cu succes!
+            }
+        }
+    }
+
+    // Scrierea în log conform succesului/eșecului
+    char log_msg[256];
+    if (monitor_notified) {
+        snprintf(log_msg, sizeof(log_msg), "ADD (Monitor notified)");
+        printf("\n Raport adaugat cu succes! ID: %d. Monitorul a fost notificat.\n", r.id);
+    } else {
+        snprintf(log_msg, sizeof(log_msg), "ADD (Monitor NOT informed)");
+        printf("\n Raport adaugat cu succes! ID: %d. ATENTIE: Monitorul nu a putut fi notificat.\n", r.id);
+    }
+
+    log_action(district, log_msg);
 }
 
 void list(const char *district) {

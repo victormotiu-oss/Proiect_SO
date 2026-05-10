@@ -31,36 +31,43 @@ void handle_signal(int sig)
 {
     if(sig==SIGUSR1)
     {
-        const char *msg="A fost adaugat un raport nou!";
-        write(STDOUT_FILENO,msg, strlen(msg));
+        const char *msg="A fost adaugat un raport nou!\n";
+        write(STDOUT_FILENO, msg, strlen(msg));
     }
     else if(sig==SIGINT)
     {
-        const char *msg="SIGINT primit. Sterg fisierul si iesi";
+        const char *msg="SIGINT primit. Sterg fisierul si ies.\n";
         write(STDOUT_FILENO, msg, strlen(msg));
         unlink(".monitor_pid");
+        exit(0); 
     }
 }
 
 int main()
 {
     create_monitorpid(".");
+    
     struct sigaction action_ignore;
     memset(&action_ignore, 0x00, sizeof(struct sigaction));
     action_ignore.sa_handler = handle_signal;
 
-    if (sigaction(SIGUSR1, &action_ignore, NULL) < 0)
-    {
+    if (sigaction(SIGUSR1, &action_ignore, NULL) < 0) {
         perror("sigaction SIGUSR1 ignore");
         exit(-1);
     }
+
     struct sigaction action_ignore2;
     memset(&action_ignore2, 0x00, sizeof(struct sigaction));
     action_ignore2.sa_handler = handle_signal;
 
-    if (sigaction(SIGINT, &action_ignore2, NULL) < 0)
-    {
+    if (sigaction(SIGINT, &action_ignore2, NULL) < 0) {
         perror("sigaction SIGINT ignore");
-        exit(-1);	     
+        exit(-1);        
     }
+
+    while (1) {
+        pause(); 
+    }
+
+    return 0;
 }
