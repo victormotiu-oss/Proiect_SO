@@ -45,6 +45,18 @@ void handle_signal(int sig)
 
 int main()
 {
+    int pid_check=open(".monitor_pid", O_RDONLY);
+    if(pid_check!=-1)
+    {
+        char pid_vechi[32];
+        read(pid_check, pid_vechi, sizeof(pid_vechi));
+        close(pid_check);
+        printf("Monitorul este deja pornit cu PID: %s\n", pid_vechi);
+        fflush(stdout);
+        exit(1);
+
+    }
+
     create_monitorpid(".");
     
     struct sigaction action_ignore;
