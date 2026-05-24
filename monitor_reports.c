@@ -19,6 +19,8 @@ void create_monitorpid(const char *district)
     if(fd==-1) return;
 
     printf("Fisierul monitor a fost creat!");
+    fflush(stdout);
+
     char buffer[256];
     pid_t p=getpid();
     int lungime=snprintf(buffer,sizeof(buffer),"%d",p);
@@ -51,6 +53,7 @@ int main()
         char pid_vechi[32];
         read(pid_check, pid_vechi, sizeof(pid_vechi));
         close(pid_check);
+        
         printf("Monitorul este deja pornit cu PID: %s\n", pid_vechi);
         fflush(stdout);
         exit(1);

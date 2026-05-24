@@ -12,6 +12,7 @@
 #define ROLE_MANAGER 1
 #define ROLE_INSPECTOR 2
 
+// definim ce date salvăm pe hard disk pentru fiecare problemă
 typedef struct {
     int id;
     char inspector[32];
@@ -23,9 +24,11 @@ typedef struct {
     char description[128];
 } Report;
 
+// ECUSONUL CURENT: Variabile care țin minte pe tot parcursul programului cine ești (rol și nume)
 int g_role = 0;
 char g_user[32] = "";
 
+// FAZA 1 (AI): Sparge textul "severity:>=:2" în 3 bucăți ("severity", ">=", "2")
 int parse_condition(const char *input, char *field, char *op, char *value) {
     char temp[256];
     strncpy(temp, input, sizeof(temp));
@@ -45,9 +48,10 @@ int parse_condition(const char *input, char *field, char *op, char *value) {
     return 1;
 }
 
+// FAZA 1 (AI): Ia un raport și verifică dacă se potrivește cu bucățile de filtru de mai sus
 int match_condition(Report *r, const char *field, const char *op, const char *value) {
     if (strcmp(field, "severity") == 0) {
-        int val = atoi(value);
+        int val = atoi(value); // Transformă textul în număr
         if (strcmp(op, ">=") == 0) return r->severity >= val;
         if (strcmp(op, "==") == 0) return r->severity == val;
     }
@@ -57,6 +61,7 @@ int match_condition(Report *r, const char *field, const char *op, const char *va
     return 0; 
 }
 
+// Verifică permisiunile fișierului înainte să te lase să faci o acțiune
 int check_access(const char *filepath, int req_manager, int req_inspector) {
     struct stat st;
     if (stat(filepath, &st) < 0) return 1; 
@@ -72,35 +77,37 @@ int check_access(const char *filepath, int req_manager, int req_inspector) {
     return 1;
 }
 
+// Șterge tot folderul cu rm -rf
 void remove_district(const char *district)
 {
-    if(g_role!=ROLE_MANAGER){
+    if(g_role != ROLE_MANAGER){
         printf("Doar managerul are access sa stearga un district");
         return;
     }
     char symlink[256];
-    snprintf(symlink,sizeof(symlink),"active_reports-%s", district);
+    snprintf(symlink, sizeof(symlink), "active_reports-%s", district);
     
+    // Părintele creează un copil, copilul dă comanda de ștergere, părintele așteaptă
     pid_t p = fork();
-    if(p==0){
-        execlp("rm","rm","-rf", district,NULL);
+    if(p == 0){
+        execlp("rm", "rm", "-rf", district, NULL); // Copilul devine "rm -rf"
     }
     else {
-        waitpid(p,NULL,0);
-        if(unlink(symlink)==-1){
+        waitpid(p, NULL, 0); // Părintele așteaptă finalizarea
+        
+        // La final se șterge și shortcut-ul (symlink)
+        if(unlink(symlink) == -1){
             printf("Nu s-a sters symlink!\n");
             return;
         }
-        else
-        if(unlink(symlink)==0){
+        else if(unlink(symlink) == 0){
             printf("Symlink sters cu success");
             return;
         }
     }
-    
 }
 
-
+// Notează automat în fișier cine ești, la ce oră și ce acțiune ai făcut
 void log_action(const char *district, const char *action) {
     char path[256];
     snprintf(path, sizeof(path), "%s/logged_district", district);
@@ -119,6 +126,7 @@ void log_action(const char *district, const char *action) {
     close(fd);
 }
 
+// SETUP DISTRICT: Creează folderul nou, setările și shortcut-ul (symlink)
 void init_district(const char *district) {
     mkdir(district, 0750);
 
@@ -137,6 +145,7 @@ void init_district(const char *district) {
     symlink(path, sym); 
 }
 
+// ADAUGĂ RAPORT: Ia datele de la tastatură, le salvează pe disc și trimite semnalul către Monitor
 void add(const char *district) {
     init_district(district);
     char path[256];
@@ -156,16 +165,12 @@ void add(const char *district) {
     strncpy(r.inspector, g_user, 31);
 
     printf("\n--- Adaugare Raport Nou in %s ---\n", district);
-    
     printf("Categorie (ex: road, lighting, flooding): ");
     scanf("%15s", r.category);
-
     printf("Latitudine (ex: 44.42): ");
     scanf("%f", &r.lat);
-
     printf("Longitudine (ex: 26.10): ");
     scanf("%f", &r.lon);
-
     printf("Severitate (1=minor, 2=moderat, 3=critic): ");
     scanf("%d", &r.severity);
 
@@ -181,9 +186,8 @@ void add(const char *district) {
     
     chmod(path, 0664); 
     
+    // Caută PID-ul monitorului și îi dă un "ghiont" cu semnalul SIGUSR1
     int monitor_notified = 0; 
-    
-    // Deschidem fișierul .monitor_pid din directorul curent
     int pid_fd = open(".monitor_pid", O_RDONLY);
     if (pid_fd >= 0) {
         char pid_buf[32] = {0};
@@ -192,15 +196,12 @@ void add(const char *district) {
         
         if (bytes_read > 0) {
             pid_t monitor_pid = (pid_t)atoi(pid_buf);
-            
-            // Folosim kill pentru a trimite semnalul. kill returnează 0 pe succes.
             if (monitor_pid > 0 && kill(monitor_pid, SIGUSR1) == 0) {
-                monitor_notified = 1; // Semnalul a fost trimis cu succes!
+                monitor_notified = 1; 
             }
         }
     }
 
-    // Scrierea în log conform succesului/eșecului
     char log_msg[256];
     if (monitor_notified) {
         snprintf(log_msg, sizeof(log_msg), "ADD (Monitor notified)");
@@ -213,6 +214,7 @@ void add(const char *district) {
     log_action(district, log_msg);
 }
 
+// AFIȘARE TOATE: Listează rapoartele și calculează manual textul de permisiuni (ex: rw-rw-r--)
 void list(const char *district) {
     char path[256];
     snprintf(path, sizeof(path), "%s/reports.dat", district);
@@ -238,6 +240,7 @@ void list(const char *district) {
     log_action(district, "LIST");
 }
 
+// AFIȘARE DETALII: Caută un anumit ID de raport și printează absolut tot despre el
 void view(const char *district, int report_id) {
     char path[256];
     snprintf(path, sizeof(path), "%s/reports.dat", district);
@@ -259,6 +262,7 @@ void view(const char *district, int report_id) {
     log_action(district, "VIEW");
 }
 
+// ȘTERGERE RAPORT: Caută raportul, mută rapoartele următoare mai în spate să acopere gaura și taie coada
 void remove_report(const char *district, int report_id) {
     if (g_role != ROLE_MANAGER) {
         printf("Eroare: Doar managerul poate sterge rapoarte.\n");
@@ -292,7 +296,7 @@ void remove_report(const char *district, int report_id) {
             write_pos += sizeof(Report);
         }
         
-        ftruncate(fd, write_pos);
+        ftruncate(fd, write_pos); // Aici se taie fizic bucata de fișier rămasă în plus la final
         printf("Raport %d sters.\n", report_id);
         log_action(district, "REMOVE");
     } else {
@@ -301,6 +305,7 @@ void remove_report(const char *district, int report_id) {
     close(fd);
 }
 
+// ACTUALIZARE PRAG: Modifică setarea din district.cfg doar dacă permisiunile nu au fost alterate
 void update_threshold(const char *district, int new_val) {
     if (g_role != ROLE_MANAGER) {
         printf("Eroare: Doar managerul poate schimba threshold-ul.\n");
@@ -328,6 +333,7 @@ void update_threshold(const char *district, int new_val) {
     }
 }
 
+// FILTRARE: Se folosește de funcțiile AI de mai sus pentru a afișa doar rapoartele cerute
 void filter(const char *district, const char *condition) {
     char path[256];
     snprintf(path, sizeof(path), "%s/reports.dat", district);
@@ -351,8 +357,12 @@ void filter(const char *district, const char *condition) {
     log_action(district, "FILTER");
 }
 
+//  Amestecă ID-urile aleatorii, îți pune ecusonul și trimite execuția la funcția corectă
 int main(int argc, char *argv[]) {
-    // Parsare argumente de bază
+    
+    srand(time(NULL)); // Generează numere aleatorii pentru ID-uri
+
+    // Află cine ești și ce rol ai
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--role") == 0) {
             if (strcmp(argv[i+1], "manager") == 0) g_role = ROLE_MANAGER;
@@ -363,6 +373,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // Află ce comandă am dat și apelează funcția
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--add") == 0) add(argv[i+1]);
         if (strcmp(argv[i], "--list") == 0) list(argv[i+1]);
@@ -370,7 +381,7 @@ int main(int argc, char *argv[]) {
         if (strcmp(argv[i], "--remove_report") == 0) remove_report(argv[i+1], atoi(argv[i+2]));
         if (strcmp(argv[i], "--update_threshold") == 0) update_threshold(argv[i+1], atoi(argv[i+2]));
         if (strcmp(argv[i], "--filter") == 0) filter(argv[i+1], argv[i+2]);
-        if (strcmp(argv[i], "--remove_district")==0 ) remove_district(argv[i+1]);
+        if (strcmp(argv[i], "--remove_district") == 0) remove_district(argv[i+1]);
     }
 
     return 0;
